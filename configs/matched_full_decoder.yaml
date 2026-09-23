@@ -1,0 +1,189 @@
+# Matched-protocol full-decoder arm: full fine-tuning of the entire
+# language-model decoder (no LoRA), under an initialization, optimizer,
+# data split, and regularization scheme held identical to the matched LoRA
+# arm (matched_lora.yaml / matched_lora_full9200.yaml), so that adaptation
+# scope is the only factor differing between the two comparisons.
+#
+# Design notes:
+#
+#   1. Training length (max_steps=9200, warmup_steps=460, same 5% fraction).
+#      Raw optimizer-step counts are not comparable across different data
+#      splits with different total example counts. 9200 steps on this
+#      recipe's data split (10,619 cuts, effective batch 32, ~331.8
+#      optimizer-steps per true epoch) corresponds to 27.72 true epochs --
+#      matched to the training exposure of this project's original LoRA
+#      baseline configurations (10,000 steps on an 11,543-cut split, at
+#      ~360.7 optimizer-steps per true epoch, also 27.72 true epochs). An
+#      earlier, shorter run of this same recipe (~6 true epochs) already
+#      outperformed the unregularized LoRA baseline and came within about a
+#      point of the regularized LoRA result, despite the unequal exposure --
+#      motivating a properly matched-exposure comparison at the full 27.72
+#      true epochs to see whether that advantage holds, grows, or reverses.
+#
+#   2. SpecAugment is added (identical block to the LoRA arm's
+#      configuration) because it is the one regularization intervention
+#      with direct measured evidence behind it in this exact codebase (a
+#      matched-capacity LoRA ablation showed a substantial WER improvement
+#      from regularization). No decoder-dropout equivalent is added --
+#      the language model's own configuration only exposes an
+#      attention-dropout setting that is not wired through this project's
+#      model-composition path -- leaving the two arms asymmetric on exactly
+#      one regularization axis that LoRA can natively express (adapter
+#      dropout) and full-decoder fine-tuning structurally cannot replicate.
+#
+#   3. weight_decay is set to 1e-2, matching the LoRA arm. Under this
+#      optimizer's fp32 master-weight arithmetic, weight decay is
+#      numerically functional (unlike the plain fp16 optimizer used for
+#      this project's original baseline configurations, where it was
+#      proven numerically inert at these magnitudes) -- so leaving one arm
+#      at a different weight-decay value than the other would introduce an
+#      uncontrolled regularization difference on exactly the axis this
+#      comparison is designed to isolate.
+#
+#   4. model.optimizer.lr (2e-5) was selected via a short learning-rate
+#      probe (three candidates, 375 steps each, evaluated on the full
+#      915-sample development set): 5e-6 reached 31.17% WER, 1e-5 reached
+#      28.15%, 2e-5 reached 25.62% -- monotonically improving with no
+#      plateau observed within the probe's step budget, so the highest
+#      candidate tested was selected.
+#
+#   5. Checkpoints are saved every 2300 steps (4 checkpoints spanning the
+#      run: 25/50/75/100%), rather than only keeping the checkpoint with
+#      the lowest validation loss. This project's own measurements show
+#      validation loss and word error rate can decouple in this training
+#      regime -- the checkpoint with the best validation loss has, in at
+#      least one measured case, scored a WORSE word error rate than a
+#      later checkpoint with worse validation loss. Final checkpoint
+#      selection for this arm's headline result is therefore done
+#      post-hoc by word error rate on the saved checkpoints, evaluated on
+#      the held-out development set (never the test set, to avoid
+#      contaminating the final reported number across multiple candidate
+#      checkpoints) -- the test set is touched exactly once, for the
+#      single development-set-selected best checkpoint.
+
+model:
+  pretrained_llm: Qwen/Qwen3-1.7B
+  pretrained_asr: nvidia/canary-1b-flash
+  pretrained_weights: True
+  load_released_pretrained: True
+
+  freeze_params:
+    - "^perception\\.preprocessor\\..+$"
+    - "^perception\\.encoder\\..+$"
+    - "^embed_tokens\\..+$"
+    - "^llm\\.lm_head\\..+$"
+  prevent_freeze_params: []
+
+  prompt_format: qwen
+  audio_locator_tag: "<|audioplaceholder|>"
+
+  gradient_clip_val_unscaled: 1000.0
+
+  perception:
+    target: nemo.collections.speechlm2.modules.perception.AudioPerceptionModule
+    output_dim: 2048
+    modality_adapter:
+      _target_: nemo.collections.speechlm2.modules.perception.IdentityConnector
+      d_model: 1024
+    spec_augment:
+      _target_: nemo.collections.asr.modules.SpectrogramAugmentation
+      freq_masks: 2
+      time_masks: 10
+      freq_width: 27
+      time_width: 5
+
+  optimizer:
+    _target_: master_weight_adamw.MasterWeightAdamW
+    lr: 2e-5
+    bridge_lr: 5e-5
+    betas: [0.9, 0.98]
+    weight_decay: 1e-2
+    eps: 1e-8
+    loss_scale: 1024.0
+
+  lr_scheduler:
+    _target_: nemo.core.optim.lr_scheduler.CosineAnnealing
+    warmup_steps: 460
+    min_lr: 1e-7
+    max_steps: ${trainer.max_steps}
+
+trainer:
+  devices: 4
+  accelerator: gpu
+  num_nodes: 1
+  precision: 16-true
+  logger: False
+  enable_checkpointing: False
+  use_distributed_sampler: False
+  max_steps: 9200
+  limit_train_batches: 1000
+  limit_val_batches: 200
+  log_every_n_steps: 50
+  num_sanity_val_steps: 1
+  accumulate_grad_batches: 8
+  strategy:
+    _target_: lightning.pytorch.strategies.ModelParallelStrategy
+    tensor_parallel_size: 1
+    data_parallel_size: 4
+
+data:
+  train_ds:
+    sample_rate: 16000
+    prompt_format: ${model.prompt_format}
+    token_equivalent_duration: 0.08
+    input_cfg:
+      - type: lhotse_as_conversation
+        cuts_path: /home/kotasthane/canary-ft/data/train_cuts_v2.jsonl.gz
+        audio_locator_tag: ${model.audio_locator_tag}
+        tags:
+          context: "Transcribe the following:"
+    seed: 1234
+    shuffle: true
+    shard_seed: "randomized"
+    num_workers: 1
+    batch_size: 1
+
+  validation_ds:
+    prompt_format: ${model.prompt_format}
+    token_equivalent_duration: 0.08
+    datasets:
+      uwb_atcc_dev:
+        input_cfg:
+          - type: lhotse_as_conversation
+            cuts_path: /home/kotasthane/canary-ft/data/dev_cuts.jsonl.gz
+            audio_locator_tag: ${model.audio_locator_tag}
+            tags:
+              context: "Transcribe the following:"
+    sample_rate: 16000
+    batch_size: 1
+    seed: 1234
+    shard_seed: 1234
+
+exp_manager:
+  exp_dir: null
+  explicit_log_dir: /home/kotasthane/canary-ft/experiments_matched_full_decoder/
+  name: canary_uwb_atcc_matched_full_decoder
+  create_tensorboard_logger: False
+  create_checkpoint_callback: true
+  use_datetime_version: true
+  max_time_per_run: "04:00:00:00"
+  resume_if_exists: false
+  resume_ignore_no_checkpoint: true
+  create_wandb_logger: false
+  create_early_stopping_callback: true
+  early_stopping_callback_params:
+    monitor: val_loss
+    mode: min
+    min_delta: 0.0
+    patience: 100000
+    check_finite: true
+    divergence_threshold: 50.0
+  checkpoint_callback_params:
+    filename: "{step}"
+    monitor: val_loss
+    mode: min
+    every_n_train_steps: 2300
+    every_n_epochs: null
+    save_top_k: -1
+    always_save_nemo: false
+    save_nemo_on_train_end: false

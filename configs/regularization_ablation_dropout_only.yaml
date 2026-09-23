@@ -1,0 +1,134 @@
+# Regularization-decomposition ablation B: LoRA dropout ONLY, isolated from
+# the v3 configuration's other two simultaneous changes over v1 (SpecAugment
+# and weight decay). See regularization_ablation_specaugment_only.yaml's
+# header for the full rationale and the short-exposure caveat, which applies
+# identically to this sibling configuration.
+#
+# Exact minimal diff from v1_lora_baseline.yaml: ONLY lora_dropout changes
+# (0.01 -> 0.1, matching v3's value). No SpecAugment block. weight_decay
+# stays at v1's 1e-3 (shown numerically inert under this optimizer regardless
+# of value, see the methodology notes in the top-level README). Optimizer,
+# learning rate, schedule, trainer, and data settings are otherwise identical
+# to v1.
+#
+# Short-exposure caveat: this ablation trains only 500 steps (5% of v1/v3's
+# original 10,000-step exposure), due to compute constraints at the time it
+# was run. The result is directional only, not a definitive decomposition at
+# matched exposure -- see the top-level README's Limitations section.
+
+model:
+  pretrained_llm: Qwen/Qwen3-1.7B
+  pretrained_asr: nvidia/canary-1b-flash
+  pretrained_weights: True
+
+  freeze_params:
+    - "^llm\\..+$"
+    - "^embed_tokens\\..+$"
+    - "^perception\\.preprocessor\\..+$"
+    - "^perception\\.encoder\\..+$"
+  prevent_freeze_params: []
+
+  prompt_format: qwen
+  audio_locator_tag: "<|audioplaceholder|>"
+
+  lora:
+    task_type: CAUSAL_LM
+    r: 128
+    lora_alpha: 256
+    lora_dropout: 0.1
+    target_modules: ["q_proj", "v_proj"]
+
+  perception:
+    target: nemo.collections.speechlm2.modules.perception.AudioPerceptionModule
+    output_dim: 2048
+    modality_adapter:
+      _target_: nemo.collections.speechlm2.modules.perception.IdentityConnector
+      d_model: 1024
+
+  optimizer:
+    _target_: torch.optim.AdamW
+    lr: 5e-4
+    betas: [0.9, 0.98]
+    weight_decay: 1e-3
+    eps: 1e-4
+
+  lr_scheduler:
+    _target_: nemo.core.optim.lr_scheduler.CosineAnnealing
+    warmup_steps: 1000
+    min_lr: 1e-6
+    max_steps: ${trainer.max_steps}
+
+trainer:
+  devices: 4
+  accelerator: gpu
+  num_nodes: 1
+  precision: 16-true
+  logger: False
+  enable_checkpointing: False
+  use_distributed_sampler: False
+  max_steps: 500
+  limit_train_batches: 1000
+  val_check_interval: 500
+  limit_val_batches: 50
+  log_every_n_steps: 50
+  num_sanity_val_steps: 1
+  gradient_clip_val: 1.0
+  accumulate_grad_batches: 4
+  strategy:
+    _target_: lightning.pytorch.strategies.ModelParallelStrategy
+    tensor_parallel_size: 1
+    data_parallel_size: 4
+
+data:
+  train_ds:
+    sample_rate: 16000
+    prompt_format: ${model.prompt_format}
+    token_equivalent_duration: 0.08
+    input_cfg:
+      - type: lhotse_as_conversation
+        cuts_path: /home/kotasthane/canary-ft/data/train_cuts.jsonl.gz
+        audio_locator_tag: ${model.audio_locator_tag}
+        tags:
+          context: "Transcribe the following:"
+    seed: 1234
+    shuffle: true
+    shard_seed: "randomized"
+    num_workers: 1
+    batch_size: 2
+
+  validation_ds:
+    prompt_format: ${model.prompt_format}
+    token_equivalent_duration: 0.08
+    datasets:
+      uwb_atcc_test:
+        input_cfg:
+          - type: lhotse_as_conversation
+            cuts_path: /home/kotasthane/canary-ft/data/test_cuts.jsonl.gz
+            audio_locator_tag: ${model.audio_locator_tag}
+            tags:
+              context: "Transcribe the following:"
+    sample_rate: 16000
+    batch_size: 1
+    seed: 1234
+    shard_seed: "randomized"
+
+exp_manager:
+  exp_dir: null
+  explicit_log_dir: /home/kotasthane/canary-ft/experiments_v3_dropout_only/
+  name: canary_uwb_atcc_v3_dropout_only
+  create_tensorboard_logger: False
+  create_checkpoint_callback: true
+  use_datetime_version: true
+  max_time_per_run: "02:00:00:00"
+  resume_if_exists: false
+  resume_ignore_no_checkpoint: true
+  create_wandb_logger: false
+  checkpoint_callback_params:
+    filename: "{step}"
+    monitor: val_loss
+    mode: min
+    every_n_train_steps: 500
+    every_n_epochs: null
+    save_top_k: -1
+    always_save_nemo: false
+    save_nemo_on_train_end: false

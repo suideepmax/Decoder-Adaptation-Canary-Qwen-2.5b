@@ -1,0 +1,146 @@
+# Matched-protocol LoRA arm, full 9200-step run -- the fully exposure-matched
+# counterpart to matched_lora_truncated.yaml, trained to the same 9200-step
+# (27.72-true-epoch) target as matched_full_decoder.yaml, so that the two
+# arms are compared at identical training exposure with no truncation on
+# either side.
+#
+# Differences from matched_lora_truncated.yaml: trainer.max_steps 3700->9200,
+# lr_scheduler.warmup_steps 185->460 (same 5% fraction), checkpoint interval
+# 925->1150 (checkpoints land on 1150/2300/3450/4600/5750/6900/8050/9200 --
+# four of which, 2300/4600/6900/9200, exactly match matched_full_decoder.
+# yaml's own checkpoint steps, giving a genuinely step-matched learning
+# curve between the two arms), and a separate explicit_log_dir so this run
+# never collides with the truncated run's own checkpoints/results.
+#
+# All other fields (LoRA rank/alpha/dropout/target_modules, optimizer
+# learning rate/bridge learning rate/weight decay, SpecAugment, data,
+# freeze_params) are identical to matched_lora_truncated.yaml -- this is
+# the same hyperparameter configuration, trained for longer.
+
+model:
+  pretrained_llm: Qwen/Qwen3-1.7B
+  pretrained_asr: nvidia/canary-1b-flash
+  pretrained_weights: true
+  load_released_pretrained: true
+  freeze_params:
+  - ^llm\..+$
+  - ^embed_tokens\..+$
+  - ^perception\.preprocessor\..+$
+  - ^perception\.encoder\..+$
+  prevent_freeze_params:
+  - ^.+\.lora_.+$
+  lora:
+    task_type: CAUSAL_LM
+    r: 128
+    lora_alpha: 256
+    lora_dropout: 0.1
+    target_modules:
+    - q_proj
+    - v_proj
+  prompt_format: qwen
+  audio_locator_tag: <|audioplaceholder|>
+  gradient_clip_val_unscaled: 1000.0
+  perception:
+    target: nemo.collections.speechlm2.modules.perception.AudioPerceptionModule
+    output_dim: 2048
+    modality_adapter:
+      _target_: nemo.collections.speechlm2.modules.perception.IdentityConnector
+      d_model: 1024
+    spec_augment:
+      _target_: nemo.collections.asr.modules.SpectrogramAugmentation
+      freq_masks: 2
+      time_masks: 10
+      freq_width: 27
+      time_width: 5
+  optimizer:
+    _target_: master_weight_adamw.MasterWeightAdamW
+    lr: 0.0005
+    bridge_lr: 5.0e-05
+    betas:
+    - 0.9
+    - 0.98
+    weight_decay: 0.01
+    eps: 1.0e-08
+    loss_scale: 1024.0
+  lr_scheduler:
+    _target_: nemo.core.optim.lr_scheduler.CosineAnnealing
+    warmup_steps: 460
+    min_lr: 1.0e-07
+    max_steps: 9200
+trainer:
+  devices: 4
+  accelerator: gpu
+  num_nodes: 1
+  precision: 16-true
+  logger: false
+  enable_checkpointing: false
+  use_distributed_sampler: false
+  max_steps: 9200
+  limit_train_batches: 1000
+  limit_val_batches: 200
+  log_every_n_steps: 50
+  num_sanity_val_steps: 1
+  accumulate_grad_batches: 8
+  strategy:
+    _target_: lightning.pytorch.strategies.ModelParallelStrategy
+    tensor_parallel_size: 1
+    data_parallel_size: 4
+data:
+  train_ds:
+    sample_rate: 16000
+    prompt_format: qwen
+    token_equivalent_duration: 0.08
+    input_cfg:
+    - type: lhotse_as_conversation
+      cuts_path: /home/kotasthane/canary-ft/data/train_cuts_v2.jsonl.gz
+      audio_locator_tag: <|audioplaceholder|>
+      tags:
+        context: 'Transcribe the following:'
+    seed: 1234
+    shuffle: true
+    shard_seed: randomized
+    num_workers: 1
+    batch_size: 1
+  validation_ds:
+    prompt_format: qwen
+    token_equivalent_duration: 0.08
+    datasets:
+      uwb_atcc_dev:
+        input_cfg:
+        - type: lhotse_as_conversation
+          cuts_path: /home/kotasthane/canary-ft/data/dev_cuts.jsonl.gz
+          audio_locator_tag: <|audioplaceholder|>
+          tags:
+            context: 'Transcribe the following:'
+    sample_rate: 16000
+    batch_size: 1
+    seed: 1234
+    shard_seed: 1234
+exp_manager:
+  exp_dir: null
+  explicit_log_dir: /home/kotasthane/canary-ft/experiments_matched_lora_full9200/
+  name: canary_uwb_atcc_matched_lora
+  create_tensorboard_logger: false
+  create_checkpoint_callback: true
+  use_datetime_version: true
+  max_time_per_run: 04:00:00:00
+  resume_if_exists: false
+  resume_ignore_no_checkpoint: true
+  create_wandb_logger: false
+  create_early_stopping_callback: false
+  early_stopping_callback_params:
+    monitor: val_loss
+    mode: min
+    min_delta: 0.0
+    patience: 100000
+    check_finite: true
+    divergence_threshold: 50.0
+  checkpoint_callback_params:
+    filename: '{step}'
+    monitor: val_loss
+    mode: min
+    every_n_train_steps: 1150
+    every_n_epochs: null
+    save_top_k: -1
+    always_save_nemo: false
+    save_nemo_on_train_end: false
