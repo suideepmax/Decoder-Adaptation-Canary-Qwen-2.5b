@@ -8,6 +8,16 @@ experimental protocol, evaluate the effect of a documented model-loading
 pitfall on the resulting comparison, and report a decoding-fairness
 analysis against an external CTC baseline.
 
+**[RESULTS.md](RESULTS.md) contains every measured result referenced in
+the paper**, in full detail: the external Wav2Vec2 baseline's full
+training curve, the original v1/v2/v3 study, decoding-fairness tables for
+all four evaluated checkpoints (not just the two matched-protocol arms),
+every per-checkpoint development-set WER for all three matched-protocol
+arms, the learning-rate selection probes, the dataset-integrity audits,
+and the full regularization-decomposition ablation. This README
+summarizes the headline findings; RESULTS.md is the source of record for
+every number.
+
 ## Summary
 
 Two easily-missed defaults materially change the outcome of a decoder-
@@ -50,15 +60,20 @@ non-native speakers.
 | Test | 2,886 | Session-disjoint from all of the above; used for every headline result in this work. |
 
 `scripts/make_dev_split.py` reproduces the corrected training/development
-split from the original training manifest.
+split from the original training manifest. Full dataset-integrity audit
+results (leakage checks on both this pipeline and the external Wav2Vec2
+baseline's independent data pipeline) are in [RESULTS.md](RESULTS.md) §4.
 
 ## Models compared
 
-All models are Canary-Qwen-2.5B: a frozen Canary-1B-Flash speech encoder,
-a linear connector layer, and a Qwen3-1.7B language-model decoder.
+All Canary-Qwen models are Canary-Qwen-2.5B: a frozen Canary-1B-Flash
+speech encoder, a linear connector layer, and a Qwen3-1.7B language-model
+decoder. The Wav2Vec2 model is an independent, non-SALM external
+baseline used throughout as the point of comparison.
 
-| Config | Adaptation scope | Regularization | Initialization | Result (test WER) |
+| Model | Adaptation scope | Regularization | Initialization | Result (test WER, no LM) |
 |---|---|---|---|---|
+| `facebook/wav2vec2-large-960h-lv60-self` (external CTC baseline) | Full fine-tuning (317M params) | — | Released checkpoint | 14.54% (12.69% with in-domain KenLM) |
 | `configs/v1_lora_baseline.yaml` | LoRA (r=128, q/v projections only) | None | Composed fresh (random connector) | 23.32% |
 | `configs/v2_encoder_unfrozen.yaml` | LoRA + full encoder fine-tuning | None | Composed fresh | 23.82% |
 | `configs/v3_lora_regularized.yaml` | LoRA (r=128, q/v) | SpecAugment + dropout 0.1 + weight decay | Composed fresh | 20.70% |
@@ -68,7 +83,9 @@ a linear connector layer, and a Qwen3-1.7B language-model decoder.
 
 v1/v2/v3 are the original baseline configurations; the `matched_*` configs
 are the corrected-initialization, matched-protocol comparison this work's
-main result is drawn from.
+main result is drawn from. See [RESULTS.md](RESULTS.md) §1-2 for the
+Wav2Vec2 and v1/v2/v3 full training curves, and §5 for every
+matched-protocol arm's complete per-checkpoint table.
 
 ## Method
 
@@ -92,6 +109,15 @@ comparison is most informative given a fixed compute budget) reaches
 20.62% — the truncated comparison alone would suggest a larger, 1.89-point
 gap, which the fully matched run shows is partly an exposure-mismatch
 artifact rather than a difference attributable to adaptation scope alone.
+
+### Learning-rate selection
+
+Each matched-protocol arm's learning rate was chosen from three
+candidates via a short probe (375 steps each, evaluated by development-set
+WER): full-decoder settled on 2e-5 (31.17% → 28.15% → 25.62% dev WER
+across the three candidates), LoRA settled on 5e-4 (37.66% → 30.01% →
+30.04%). Full probe results, including validation loss at each candidate,
+are in [RESULTS.md](RESULTS.md) §5.
 
 ### Checkpoint-selection instability
 
@@ -119,15 +145,20 @@ baseline.
 
 | Config | Native (greedy) | Beam search (rank-1, no LM) | Beam + in-domain KenLM (α=0.5) |
 |---|---|---|---|
-| Full-decoder (matched) | 18.73% | 17.54% | 18.66% |
-| LoRA (matched, full exposure) | 19.70% | 18.67% | 19.16% |
+| v1 (original, unregularized) | 23.32% | 22.28% | 21.79% |
+| v3 (original, regularized) | 20.70% | 19.42% | 20.14% (worse than beam alone) |
+| Full-decoder (matched) | 18.73% | 17.54% | 18.66% (worse than beam alone) |
+| LoRA (matched, full exposure) | 19.70% | 18.67% | 19.16% (worse than beam alone) |
 
-Beam search alone accounts for essentially all of the available
-improvement; adding the external language model provides no further
-benefit and is mildly harmful at the pre-registered rescoring weight for
-both arms. This indicates that giving the SALM models the same language-
-model access as the baseline does not materially close the remaining
-gap to it.
+For v1, the external LM still helps (beam+LM beats beam alone). For every
+regularized configuration (v3 and both matched-protocol arms), beam
+search alone accounts for essentially all of the available improvement,
+and the external language model provides no further benefit at the
+pre-registered rescoring weight — mildly harmful in all three cases. This
+suggests that the same regularization that improves these models'
+unassisted WER also makes them less receptive to external LM correction.
+Full alpha-sweep tables (all 6 tested values per checkpoint) are in
+[RESULTS.md](RESULTS.md) §3.
 
 ### Regularization decomposition
 
