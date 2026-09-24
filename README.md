@@ -165,11 +165,13 @@ Full alpha-sweep tables (all 6 tested values per checkpoint) are in
 The regularization added between v1 and v3 (SpecAugment, increased LoRA
 dropout, increased weight decay) was applied as three simultaneous
 changes. Weight decay can be ruled out as a contributing factor with
-certainty: under the plain fp16 optimizer used for v1/v2/v3, the
-decoupled weight-decay update term is numerically zero at every weight-
-decay value used in this project (verified directly: the update factor
-rounds to exactly 1.0 in fp16 arithmetic at these magnitudes), so it
-could not have influenced training regardless of its configured value.
+certainty: under the plain fp16 `torch.optim.AdamW` optimizer used for
+v1/v2/v3 (before the fp32-master-weight fix described in Numerical
+stability notes below), the decoupled weight-decay update term is
+numerically zero at every weight-decay value used in this project
+(verified directly: the update factor rounds to exactly 1.0 in fp16
+arithmetic at these magnitudes), so it could not have influenced training
+regardless of its configured value.
 
 `configs/regularization_ablation_specaugment_only.yaml` and
 `configs/regularization_ablation_dropout_only.yaml` isolate the
@@ -185,6 +187,15 @@ generalization benefit emerges only over substantially longer training.
 remains an open question** — the definitive version of this experiment
 (both ablations at the full 10,000-step exposure) is a well-defined
 follow-up not completed in this work.
+
+## Scope
+
+This work addresses only the UWB-ATCC decoder-adaptation-scope
+comparison for Canary-Qwen-2.5B. It does not cover ATCOSIM (a separate,
+higher-audio-quality ATC corpus on which a differently-scoped Canary-Qwen
+LoRA study exists but is out of scope here) or any Wav2Vec2 result beyond
+the single UWB-ATCC baseline used for the decoding-fairness comparison in
+this work.
 
 ## Reproducing
 
@@ -236,7 +247,8 @@ optimizer state to avoid this. `train_salm.py`'s docstring documents this
 and two further correctness fixes (gradient-norm computation under
 sharded/distributed parameters, and generation-config determinism for
 decoding) in full technical detail, verified via direct numerical checks
-described inline.
+described inline. Exact hardware, software versions, random seed, and WER
+computation methodology are in [RESULTS.md](RESULTS.md) §10.
 
 ## Limitations
 

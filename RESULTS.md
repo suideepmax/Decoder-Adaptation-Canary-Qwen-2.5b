@@ -38,14 +38,23 @@ components (`Qwen/Qwen3-1.7B` + `nvidia/canary-1b-flash`), i.e. with a
 randomly-initialized connector rather than the released model's own
 trained connector (see Section 6). Trained under a plain fp16 AdamW
 optimizer (see Section 8 for the numerical implications of this).
-10,000 steps, effective batch 32, on the original 11,543-cut training
-split (10.54h of audio).
+10,000 steps, effective batch 32 (batch size 2 × 4 gradient-accumulation
+steps × 4 GPUs), on the original 11,543-cut training split (10.54h of
+audio) — equal to **27.72 true epochs**, the same training exposure as
+every matched-protocol arm in Section 5.
+
+Shared optimizer/schedule settings across v1/v2/v3: AdamW, lr=5e-4,
+betas=(0.9, 0.98), eps=1e-4 (raised from AdamW's 1e-8 default, required
+for fp16 stability at this model's gradient magnitudes — the default
+causes overflow), cosine-annealing schedule with 1,000 warmup steps down
+to a floor of 1e-6. LoRA applied to `q_proj`/`v_proj` only, r=128,
+lora_alpha=256.
 
 | Config | Adaptation scope | Regularization | Test WER |
 |---|---|---|---|
-| v1 (`configs/v1_lora_baseline.yaml`) | LoRA r=128, q_proj+v_proj only (27.8M / 0.97% of params) | None (dropout=0.01, weight_decay=1e-3) | **23.32%** |
-| v2 (`configs/v2_encoder_unfrozen.yaml`) | LoRA r=128 (as v1) + full encoder fine-tuning (838.8M params, 29.2% of model) | None | **23.82%** |
-| v3 (`configs/v3_lora_regularized.yaml`) | LoRA r=128 (as v1) | SpecAugment (2 freq masks, 10 time masks) + LoRA dropout 0.1 + weight_decay=1e-2 | **20.70%** |
+| v1 (`configs/v1_lora_baseline.yaml`) | LoRA r=128, q_proj+v_proj only (27.8M / 0.97% of params) | None (LoRA dropout=0.01, weight_decay=1e-3) | **23.32%** |
+| v2 (`configs/v2_encoder_unfrozen.yaml`) | LoRA r=128 (as v1) + full encoder fine-tuning (838.8M params, 29.2% of model) | None (LoRA dropout=0.01, weight_decay=1e-3) | **23.82%** |
+| v3 (`configs/v3_lora_regularized.yaml`) | LoRA r=128 (as v1) | SpecAugment (2 freq masks, 10 time masks, freq_width=27, time_width=5) + LoRA dropout 0.1 + weight_decay=1e-2 | **20.70%** |
 
 v1 result independently re-verified across three separate checks: a
 fresh retraining of the identical configuration (23.3210%, matching to
@@ -55,12 +64,54 @@ re-verified via a local checkpoint re-evaluation and inference against
 the author-uploaded HuggingFace checkpoint, both bit-for-bit identical
 to 16 significant figures.
 
+**v2's exact training configuration cannot be fully recovered.** The
+23.82% result and its distinct learning-curve trajectory (Section below)
+are independently verified as genuine via inference against the
+author-uploaded HuggingFace checkpoint, but three independent sources
+checked for the config that actually produced it — the locally committed
+file, the training-config file uploaded alongside the HuggingFace
+checkpoint, and a subsequent local reconstruction attempt — were each
+found to still show the encoder frozen, i.e. none of them is capable of
+having produced an encoder-unfrozen result. `configs/v2_encoder_unfrozen.yaml`
+in this repository is therefore a freshly-constructed configuration
+(encoder unfrozen, everything else identical to v1) intended to measure
+this specific configuration going forward; it is not asserted to
+reproduce the original 23.82% run's exact hyperparameters, only its
+architecture.
+
 Unfreezing the encoder alone (v2), without regularization, does not beat
 LoRA-only adaptation (23.82% vs. 23.32%) — the ~24% plateau shared by v1
 and v2 is attributable to overfitting on the training set at this scale,
 not to the frozen decoder being an architectural bottleneck; v3 breaks
 through to 20.70% via regularization alone, at the same learning rate,
 same adaptation scope as v1.
+
+### Training curves (500-sample development subset, training-time greedy evaluation)
+
+Evaluated periodically during training on a fixed 500-sample subset of
+the development set (Section 4) — a smaller, faster proxy used during
+training only, distinct from the final full-test-set numbers in the
+table above.
+
+| Step | v1 | v2 | v3 |
+|---|---|---|---|
+| 500 | 39.14% | 46.34% | 39.51% |
+| 1,000 | 45.02% | 57.37% | 32.68% |
+| 2,000 | 30.87% | 26.67% | 27.28% |
+| 3,000 | 26.28% | 26.91% | 25.08% |
+| 5,000 | 24.77% | 24.85% | 23.00% |
+| 7,500 | 24.53% | 24.12% | 23.81% |
+| 10,000 | 24.53% | 23.89% | 22.30% |
+
+These training-time values (500-sample subset, greedy decoding on
+intermediate checkpoints) differ somewhat from the final headline test-set
+numbers above (23.32% / 23.82% / 20.70%, full 2,886-utterance test set,
+final saved checkpoint) — both the sample size and the specific
+checkpoint evaluated differ; the headline numbers are the ones to cite.
+The curve shape is still informative: v1 and v2 both plateau in the
+23-25% band from step 5,000 onward, while v3 continues improving through
+step 10,000, consistent with regularization delaying but not halting
+convergence.
 
 Weight decay's role in v3's improvement is ruled out with certainty: see
 Section 9 (regularization decomposition) and Section 8 (numerical
@@ -198,6 +249,16 @@ validation loss alone. LoRA's 3e-4 vs. 5e-4 WER is statistically
 indistinguishable at n=915 (0.03pp apart); 5e-4 was selected for its
 still-improving validation loss with no plateau observed within the
 probe's step budget.
+
+All three matched-protocol arms additionally use a separate, lower
+learning rate for the connector (bridge) layer, `bridge_lr=5e-5`, held
+fixed across all three arms (not swept) — the connector is already
+released-pretrained (Section 6), so it needs smaller updates than the
+newly-adapted decoder parameters. Optimizer eps for all three matched
+arms is 1e-8 (the fp32-master-weight optimizer, Section 8, does not need
+the raised eps that the plain-fp16 v1/v2/v3 optimizer required). Warmup
+steps are set to 5% of each arm's max_steps: 460 for both 9,200-step arms,
+185 for the 3,700-step truncated LoRA arm.
 
 ### Full-decoder arm (`configs/matched_full_decoder.yaml`)
 
@@ -410,3 +471,36 @@ actual, full-exposure improvement remains an open question** — the
 definitive version of this experiment (both ablations at the full
 10,000-step exposure, requiring approximately 42 GPU-hours total) is a
 well-defined, not-yet-completed follow-up.
+
+## 10. Hardware, software, and reproducibility details
+
+**Hardware:** 4× NVIDIA RTX 2080 Ti (11GB VRAM each), single workstation,
+no multi-node training. NVIDIA driver 570.207, CUDA 12.8.
+
+**Software (Canary-Qwen / NeMo speechlm2 pipeline):** Python 3.11;
+PyTorch 2.6.0+cu124; NeMo installed from the GitHub trunk at
+`nvidia/NeMo` (version recorded during training: 2.8.0rc0 — the
+`speechlm2` module used for SALM training is not present in NeMo's
+pip-released packages); `transformers==4.51.0`; `peft==0.14.0` (pinned
+specifically for Qwen3/LoRA compatibility); `lhotse`, `sentencepiece`,
+`hydra-core`, `omegaconf`, `pytorch-lightning`, `jiwer` for evaluation.
+Distributed strategy: FSDP2 via Lightning's `ModelParallelStrategy`
+(`tensor_parallel_size=1`, `data_parallel_size=4`) — plain DDP
+out-of-memories on this 2.5B-parameter model across 11GB GPUs. Precision:
+`16-true` (`ModelParallelStrategy` does not support mixed precision).
+
+**Software (Wav2Vec2 baseline):** Python 3.10; PyTorch 1.13.0+cu117;
+`transformers==4.24.0`; `datasets==2.14.0`; `pyctcdecode==0.4.0` (for
+CTC+KenLM decoding); trained via `torchrun` (DDP) across all 4 GPUs — the
+original reference implementation's default launcher triggers
+`DataParallel` instead, which out-of-memories at this model size on
+11GB GPUs.
+
+**Random seed:** 1234, used for both the Lhotse data-sampling seed
+(Canary-Qwen configs) and the train/test split generation (both
+pipelines). All results in this work are single-seed; see Limitations
+in `README.md`.
+
+**Word error rate computation:** `jiwer`, applied after lowercasing and
+whitespace-normalizing both reference and hypothesis text, identically
+for every model and every table in this document.
