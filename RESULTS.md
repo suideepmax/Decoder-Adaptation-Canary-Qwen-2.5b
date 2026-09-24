@@ -390,11 +390,11 @@ result, not a definitive decomposition at matched exposure.
 
 | Configuration | Test WER @ step 500 |
 |---|---|
-| Vanilla v1 (no SpecAugment, dropout=0.01) | 39.65% |
-| SpecAugment only (dropout unchanged at 0.01) | 41.41% (+1.76pp vs. vanilla) |
-| LoRA dropout only (0.1, no SpecAugment) | 40.11% (+0.46pp vs. vanilla) |
+| v1 (no SpecAugment, dropout=0.01) | 39.65% |
+| SpecAugment only (dropout unchanged at 0.01) | 41.41% (+1.76pp vs. v1) |
+| LoRA dropout only (0.1, no SpecAugment) | 40.11% (+0.46pp vs. v1) |
 
-The vanilla-v1 reference point at step 500 was obtained at zero
+The v1 reference point at step 500 was obtained at zero
 additional compute cost, from an existing checkpoint of an earlier,
 independent fresh retraining of the v1 configuration (used originally to
 verify v1's result's reproducibility, Section 2), confirmed via its own
